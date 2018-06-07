@@ -1,40 +1,36 @@
 require 'open3'
+require 'shellwords'
 
 module FFMPEG
   class Transcoder
-    attr_reader :command, :input
-
     @@timeout = 30
 
-    class << self
-      attr_accessor :timeout
+    def self.timeout=(time)
+      @@timeout = time
     end
 
-    def initialize(input, output_file, options = EncodingOptions.new, transcoder_options = {})
-      if input.is_a?(FFMPEG::Movie)
-        @movie = input
-        @input = input.path
-      end
+    def self.timeout
+      @@timeout
+    end
+
+    def initialize(movie, output_file, options = EncodingOptions.new, transcoder_options = {})
+      @movie = movie
       @output_file = output_file
 
-      @raw_options, @transcoder_options = optimize_screenshot_parameters(options, transcoder_options)
+      if options.is_a?(String)
+        @raw_options = "-i #{Shellwords.escape(@movie.path)} " + options
+      elsif options.is_a?(EncodingOptions)
+        @raw_options = options
+      elsif options.is_a?(Hash)
+        @raw_options = EncodingOptions.new(options.merge(:input => @movie.path))
+      else
+        raise ArgumentError, "Unknown options format '#{options.class}', should be either EncodingOptions, Hash or String."
+      end
 
+      @transcoder_options = transcoder_options
       @errors = []
 
       apply_transcoder_options
-
-      @input = @transcoder_options[:input] unless @transcoder_options[:input].nil?
-
-      input_options = @transcoder_options[:input_options] || []
-      iopts = []
-
-      if input_options.is_a?(Array)
-        iopts += input_options
-      else
-        input_options.each { |k, v| iopts += ['-' + k.to_s, v] }
-      end
-
-      @command = [FFMPEG.ffmpeg_binary, '-y', *iopts, '-i', @input, *@raw_options.to_a, @output_file]
     end
 
     def run(&block)
@@ -48,24 +44,23 @@ module FFMPEG
     end
 
     def encoding_succeeded?
-      @errors.empty?
+      @errors << "no output file created" and return false unless File.exists?(@output_file)
+      @errors << "encoded file is invalid" and return false unless encoded.valid?
+      true
     end
 
     def encoded
-      @encoded ||= Movie.new(@output_file) if File.exist?(@output_file)
-    end
-
-    def timeout
-      self.class.timeout
+      @encoded ||= Movie.new(@output_file)
     end
 
     private
     # frame= 4855 fps= 46 q=31.0 size=   45306kB time=00:02:42.28 bitrate=2287.0kbits/
     def transcode_movie
-      FFMPEG.logger.info("Running transcoding...\n#{command}\n")
+      @command = "#{FFMPEG.ffmpeg_binary} -y #{@raw_options} #{Shellwords.escape(@output_file)}"
+      FFMPEG.logger.info("Running transcoding...\n#{@command}\n")
       @output = ""
 
-      Open3.popen3(*command) do |_stdin, _stdout, stderr, wait_thr|
+      Open3.popen3(@command) do |stdin, stdout, stderr, wait_thr|
         begin
           yield(0.0) if block_given?
           next_line = Proc.new do |line|
@@ -77,39 +72,31 @@ module FFMPEG
               else # better make sure it wont blow up in case of unexpected output
                 time = 0.0
               end
-
-              if @movie
-                progress = time / @movie.duration
-                yield(progress) if block_given?
-              end
+              progress = time / @movie.duration
+              yield(progress) if block_given?
             end
           end
 
-          if timeout
-            stderr.each_with_timeout(wait_thr.pid, timeout, 'size=', &next_line)
+          if @@timeout
+            stderr.each_with_timeout(wait_thr.pid, @@timeout, 'size=', &next_line)
           else
             stderr.each('size=', &next_line)
           end
 
-        @errors << "ffmpeg returned non-zero exit code" unless wait_thr.value.success?
-
         rescue Timeout::Error => e
-          FFMPEG.logger.error "Process hung...\n@command\n#{command}\nOutput\n#{@output}\n"
+          FFMPEG.logger.error "Process hung...\n@command\n#{@command}\nOutput\n#{@output}\n"
           raise Error, "Process hung. Full output: #{@output}"
         end
       end
     end
 
     def validate_output_file(&block)
-      @errors << "no output file created" unless File.exist?(@output_file)
-      @errors << "encoded file is invalid" if encoded.nil? || !encoded.valid?
-
       if encoding_succeeded?
         yield(1.0) if block_given?
-        FFMPEG.logger.info "Transcoding of #{input} to #{@output_file} succeeded\n"
+        FFMPEG.logger.info "Transcoding of #{@movie.path} to #{@output_file} succeeded\n"
       else
         errors = "Errors: #{@errors.join(", ")}. "
-        FFMPEG.logger.error "Failed encoding...\n#{command}\n\n#{@output}\n#{errors}\n"
+        FFMPEG.logger.error "Failed encoding...\n#{@command}\n\n#{@output}\n#{errors}\n"
         raise Error, "Failed encoding.#{errors}Full output: #{@output}"
       end
     end
@@ -118,7 +105,7 @@ module FFMPEG
        # if true runs #validate_output_file
       @transcoder_options[:validate] = @transcoder_options.fetch(:validate) { true }
 
-      return if @movie.nil? || @movie.calculated_aspect_ratio.nil?
+      return if @movie.calculated_aspect_ratio.nil?
       case @transcoder_options[:preserve_aspect_ratio].to_s
       when "width"
         new_height = @raw_options.width / @movie.calculated_aspect_ratio
@@ -130,59 +117,53 @@ module FFMPEG
         new_width = new_width.ceil.even? ? new_width.ceil : new_width.floor
         new_width += 1 if new_width.odd?
         @raw_options[:resolution] = "#{new_width}x#{@raw_options.height}"
+      when "crop"
+        mw, mh = @movie.width.to_i, @movie.height.to_i
+        ow, oh = @raw_options.width.to_i, @raw_options.height.to_i
+        target_aspect_ratio = ow.to_f / oh.to_f
+
+        FFMPEG.logger.info "After rotating: Calculated aspect: #{@movie.calculated_aspect_ratio} Dimensions before cropping: #{mw} x #{mh}\n"
+        
+        @raw_options[:filter] = "scale=(iw*sar)*max(#{ow}/(iw*sar)\\,#{oh}/ih):ih*max(#{ow}/(iw*sar)\\,#{oh}/ih), crop=#{ow}:#{oh}"
+
+      when "fit"
+        mw, mh = @movie.width.to_i, @movie.height.to_i
+        ow, oh = @raw_options.width.to_i, @raw_options.height.to_i
+        target_aspect_ratio = ow.to_f / oh.to_f
+
+        FFMPEG.logger.info "After rotating: Calculated aspect: #{@movie.calculated_aspect_ratio} Dimensions before cropping: #{mw} x #{mh}\n"
+        
+        @raw_options[:filter] = "scale=(iw*sar)*min(#{ow}/(iw*sar)\\,#{oh}/ih):ih*min(#{ow}/(iw*sar)\\,#{oh}/ih), pad=#{ow}:#{oh}:(#{ow}-iw*min(#{ow}/iw\\,#{oh}/ih))/2:(#{oh}-ih*min(#{ow}/iw\\,#{oh}/ih))/2"
+
+      when "auto"
+
+        # Vertical videos will fit
+        # Horizontal will crop
+
+        mw, mh = @movie.width.to_i, @movie.height.to_i
+        ow, oh = @raw_options.width.to_i, @raw_options.height.to_i
+        target_aspect_ratio = ow.to_f / oh.to_f
+
+        FFMPEG.logger.info "After rotating dimensions: #{mw} x #{mh}\n"
+
+        if (mw < mh)
+
+          FFMPEG.logger.info "Doing FIT thumbnailing\n"
+
+          @raw_options[:filter] = "scale=(iw*sar)*min(#{ow}/(iw*sar)\\,#{oh}/ih):ih*min(#{ow}/(iw*sar)\\,#{oh}/ih), pad=#{ow}:#{oh}:(#{ow}-iw*min(#{ow}/iw\\,#{oh}/ih))/2:(#{oh}-ih*min(#{ow}/iw\\,#{oh}/ih))/2"
+        else
+          FFMPEG.logger.info "Doing FILL thumbnailing\n"
+
+          @raw_options[:filter] = "scale=(iw*sar)*max(#{ow}/(iw*sar)\\,#{oh}/ih):ih*max(#{ow}/(iw*sar)\\,#{oh}/ih), crop=#{ow}:#{oh}"
+        end
       end
+
     end
 
     def fix_encoding(output)
       output[/test/]
     rescue ArgumentError
       output.force_encoding("ISO-8859-1")
-    end
-
-    def optimize_screenshot_parameters(options, transcoder_options)
-      # Moves any screenshot seek_time to an 'ss' input_option
-      raw_options, input_seek_time = screenshot_seek_time(options)
-      screenshot_to_transcoder_options(input_seek_time, transcoder_options)
-
-      return raw_options, transcoder_options
-    end
-
-    def screenshot_seek_time(options)
-      # Returns any seek_time for the screenshot and removes it from the options
-      # such that the seek time can be moved to an input option for improved FFMPEG performance
-      if options.is_a?(Array)
-        seek_time_idx = options.find_index('-seek_time') unless options.find_index('-screenshot').nil?
-        unless seek_time_idx.nil?
-          options.delete_at(seek_time_idx) # delete 'seek_time'
-          input_seek_time = options.delete_at(seek_time_idx).to_s # fetch the seek value
-        end
-        result = options, input_seek_time
-      elsif options.is_a?(Hash)
-        raw_options = EncodingOptions.new(options)
-        input_seek_time = raw_options.delete(:seek_time).to_s unless raw_options[:screenshot].nil?
-        result = raw_options, input_seek_time
-      else
-        raise ArgumentError, "Unknown options format '#{options.class}', should be either EncodingOptions, Hash or Array."
-      end
-      result
-    end
-
-    def screenshot_to_transcoder_options(seek_time, transcoder_options)
-      return if seek_time.to_s == ''
-
-      input_options = transcoder_options[:input_options] || []
-      # remove ss from input options because we're overriding from seek_time
-      if input_options.is_a?(Array)
-        fi = input_options.find_index('-ss')
-        if fi.nil?
-          input_options.concat(['-ss', seek_time])
-        else
-          input_options[fi + 1] = seek_time
-        end
-      else
-        input_options[:ss] = seek_time
-      end
-      transcoder_options[:input_options] = input_options
     end
   end
 end
