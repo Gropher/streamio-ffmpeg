@@ -13,7 +13,7 @@ module FFMPEG
       @@timeout
     end
 
-    def initialize(movie, output_file, options = EncodingOptions.new, transcoder_options = {})
+    def initialize(movie, output_file, options = EncodingOptions.new, transcoder_options = {}, global_options = {})
       @movie = movie
       @output_file = output_file
 
@@ -28,6 +28,16 @@ module FFMPEG
       end
 
       @transcoder_options = transcoder_options
+
+      if global_options.is_a?(String)
+        @global_options = global_options
+      elsif global_options.is_a?(EncodingOptions)
+        @global_options = global_options
+      elsif global_options.is_a?(Hash)
+        @global_options = EncodingOptions.new(global_options)
+      else
+        raise ArgumentError, "Unknown global options format '#{global_options.class}', should be either EncodingOptions, Hash or String."
+      end
       @errors = []
 
       apply_transcoder_options
@@ -56,7 +66,7 @@ module FFMPEG
     private
     # frame= 4855 fps= 46 q=31.0 size=   45306kB time=00:02:42.28 bitrate=2287.0kbits/
     def transcode_movie
-      @command = "#{FFMPEG.ffmpeg_binary} -y #{@raw_options} #{Shellwords.escape(@output_file)}"
+      @command = "#{FFMPEG.ffmpeg_binary} #{@global_options} -y #{@raw_options} #{Shellwords.escape(@output_file)}"
       FFMPEG.logger.info("Running transcoding...\n#{@command}\n")
       @output = ""
 
