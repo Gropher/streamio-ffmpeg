@@ -63,10 +63,14 @@ module FFMPEG
       @encoded ||= Movie.new(@output_file)
     end
 
+    def transcode_command
+      "#{FFMPEG.ffmpeg_binary} #{@global_options} -y #{@raw_options} #{Shellwords.escape(@output_file)}"
+    end
+
     private
     # frame= 4855 fps= 46 q=31.0 size=   45306kB time=00:02:42.28 bitrate=2287.0kbits/
     def transcode_movie
-      @command = "#{FFMPEG.ffmpeg_binary} #{@global_options} -y #{@raw_options} #{Shellwords.escape(@output_file)}"
+      @command = transcode_command
       FFMPEG.logger.info("Running transcoding...\n#{@command}\n")
       @output = ""
 
