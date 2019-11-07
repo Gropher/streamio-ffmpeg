@@ -99,7 +99,7 @@ module FFMPEG
 
         rescue Timeout::Error => e
           FFMPEG.logger.error "Process hung...\n@command\n#{@command}\nOutput\n#{@output}\n"
-          raise Error, "Process hung. Full output: #{@output}"
+          raise Error, "Process hung. Full output: #{trunkated_output}"
         end
       end
     end
@@ -111,8 +111,12 @@ module FFMPEG
       else
         errors = "Errors: #{@errors.join(", ")}. "
         FFMPEG.logger.error "Failed encoding...\n#{@command}\n\n#{@output}\n#{errors}\n"
-        raise Error, "Failed encoding.#{errors}Full output: #{@output}"
+        raise Error, "Failed encoding.#{errors}Full output: #{trunkated_output}"
       end
+    end
+
+    def trunkated_output
+      @output.to_s.chars.last(10240).join
     end
 
     def apply_transcoder_options
