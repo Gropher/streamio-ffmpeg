@@ -6,6 +6,7 @@ module FFMPEG
     attr_reader :video_stream, :video_codec, :video_bitrate, :colorspace, :resolution, :sar, :dar
     attr_reader :audio_stream, :audio_codec, :audio_bitrate, :audio_sample_rate
     attr_reader :container
+    attr_reader :audio_tracks
 
     def initialize(path)
       raise Errno::ENOENT, "the file '#{path}' does not exist" unless File.exists?(path)
@@ -41,6 +42,8 @@ module FFMPEG
 
       output[/Audio:\ (.*)/]
       @audio_stream = $1
+
+      @audio_tracks = output.scan(/(.*) Audio:/).map {|s| s.first.split('(').last.split(')').first }
 
       if video_stream
         commas_except_in_parenthesis = /((?>[^,(]+|(\((?>[^()]+|\g<-1>)*\)))+)/ # regexp to handle "yuv420p(tv, bt709)" colorspace etc from http://goo.gl/6oi645
