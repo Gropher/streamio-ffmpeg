@@ -67,6 +67,10 @@ module FFMPEG
       "#{FFMPEG.ffmpeg_binary} #{@global_options} -y #{@raw_options} #{Shellwords.escape(@output_file)}"
     end
 
+    def trunkated_output
+      @output.to_s.chars.last(10240).join
+    end
+
     private
     # frame= 4855 fps= 46 q=31.0 size=   45306kB time=00:02:42.28 bitrate=2287.0kbits/
     def transcode_movie
@@ -113,10 +117,6 @@ module FFMPEG
         FFMPEG.logger.error "Failed encoding...\n#{@command}\n\n#{@output}\n#{errors}\n"
         raise Error, "Failed encoding.#{errors}Full output: #{trunkated_output}"
       end
-    end
-
-    def trunkated_output
-      @output.to_s.chars.last(10240).join
     end
 
     def apply_transcoder_options
